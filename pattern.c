@@ -397,27 +397,14 @@ void
 vg_output_timing_console(vg_context_t *vcp, double count,
 			 unsigned long long rate, unsigned long long total)
 {
-	double prob, time, targ;
-	char *unit;
-	char linebuf[80];
+	double prob, time_in_seconds, targ;
+	char linebuf[128];
 	int rem, p, i;
 
 	const double targs[] = { 0.5, 0.75, 0.8, 0.9, 0.95, 1.0 };
 
-	targ = rate;
-	unit = "key/s";
-	if (targ > 1000) {
-		unit = "Kkey/s";
-		targ /= 1000.0;
-		if (targ > 1000) {
-			unit = "Mkey/s";
-			targ /= 1000.0;
-		}
-	}
-
 	rem = sizeof(linebuf);
-	p = snprintf(linebuf, rem, "[%.2f %s][total %lld]",
-		     targ, unit, total);
+	p = snprintf(linebuf, rem, "\"rate\":\"%llu\",\"total\":\"%llu\"", rate, total);
 	assert(p > 0);
 	rem -= p;
 	if (rem < 0)
@@ -427,8 +414,7 @@ vg_output_timing_console(vg_context_t *vcp, double count,
 		prob = 1.0f - exp(-count/vcp->vc_chance);
 
 		if (prob <= 0.999) {
-			p = snprintf(&linebuf[p], rem, "[Prob %.1f%%]",
-				     prob * 100);
+			p = snprintf(&linebuf[p], rem, ",\"prob\":%.8f", prob);
 			assert(p > 0);
 			rem -= p;
 			if (rem < 0)
@@ -443,35 +429,10 @@ vg_output_timing_console(vg_context_t *vcp, double count,
 		}
 
 		if (targ < 1.0) {
-			time = ((-vcp->vc_chance * log(1.0 - targ)) - count) /
-				rate;
-			unit = "s";
-			if (time > 60) {
-				time /= 60;
-				unit = "min";
-				if (time > 60) {
-					time /= 60;
-					unit = "h";
-					if (time > 24) {
-						time /= 24;
-						unit = "d";
-						if (time > 365) {
-							time /= 365;
-							unit = "y";
-						}
-					}
-				}
-			}
-
-			if (time > 1000000) {
-				p = snprintf(&linebuf[p], rem,
-					     "[%d%% in %e%s]",
-					     (int) (100 * targ), time, unit);
-			} else {
-				p = snprintf(&linebuf[p], rem,
-					     "[%d%% in %.1f%s]",
-					     (int) (100 * targ), time, unit);
-			}
+			time_in_seconds = ((-vcp->vc_chance * log(1.0 - targ)) - count) / rate;
+			p = snprintf(&linebuf[p], rem,
+			     ",\"nextprob\":%.2f,\"nextdeadline\":%.3f",
+			     targ, time_in_seconds);
 			assert(p > 0);
 			rem -= p;
 			if (rem < 0)
@@ -482,10 +443,10 @@ vg_output_timing_console(vg_context_t *vcp, double count,
 
 	if (vcp->vc_found) {
 		if (vcp->vc_remove_on_match)
-			p = snprintf(&linebuf[p], rem, "[Found %lld/%ld]",
+			p = snprintf(&linebuf[p], rem, ",\"found\":\"%lld\",\"start\":\"%ld\"",
 				     vcp->vc_found, vcp->vc_npatterns_start);
 		else
-			p = snprintf(&linebuf[p], rem, "[Found %lld]",
+			p = snprintf(&linebuf[p], rem, ",\"found\":\"%lld\"",
 				     vcp->vc_found);
 		assert(p > 0);
 		rem -= p;
@@ -494,21 +455,22 @@ vg_output_timing_console(vg_context_t *vcp, double count,
 	}
 
 	if (rem) {
-		memset(&linebuf[sizeof(linebuf)-rem], 0x20, rem);
-		linebuf[sizeof(linebuf)-1] = '\0';
+		linebuf[sizeof(linebuf)-rem] = '\0';
 	}
-	printf("\r%s", linebuf);
+
+	printf("{%s}\n", linebuf);
 	fflush(stdout);
 }
 
 void
 vg_output_match_console(vg_context_t *vcp, EC_KEY *pkey, const char *pattern)
 {
-	unsigned char key_buf[512], *pend;
 	char addr_buf[64], addr2_buf[64];
+	char json_buf[192];
 	char privkey_buf[VG_PROTKEY_MAX_B58];
-	const char *keytype = "Privkey";
+	const char *keytype = "privkey";
 	int len;
+	int rem=sizeof(json_buf), p=0;
 	int isscript = (vcp->vc_format == VCF_SCRIPT);
 
 	EC_POINT *ppnt;
@@ -522,7 +484,7 @@ vg_output_match_console(vg_context_t *vcp, EC_KEY *pkey, const char *pattern)
 			     vcp->vc_pubkey_base,
 			     NULL);
 		free_ppnt = 1;
-		keytype = "PrivkeyPart";
+		keytype = "privkeypart";
 	} else {
 		ppnt = (EC_POINT *) EC_KEY_get0_public_key(pkey);
 	}
@@ -542,7 +504,7 @@ vg_output_match_console(vg_context_t *vcp, EC_KEY *pkey, const char *pattern)
 						VG_PROTKEY_DEFAULT,
 						vcp->vc_key_protect_pass);
 		if (len) {
-			keytype = "Protkey";
+			keytype = "protkey";
 		} else {
 			fprintf(stderr,
 				"ERROR: could not password-protect key\n");
@@ -554,31 +516,40 @@ vg_output_match_console(vg_context_t *vcp, EC_KEY *pkey, const char *pattern)
 	}
 
 	if (!vcp->vc_result_file || (vcp->vc_verbose > 0)) {
-		printf("\r%79s\rPattern: %s\n", "", pattern);
-	}
-
-	if (vcp->vc_verbose > 0) {
-		if (vcp->vc_verbose > 1) {
-			pend = key_buf;
-			len = i2o_ECPublicKey(pkey, &pend);
-			printf("Pubkey (hex): ");
-			dumphex(key_buf, len);
-			printf("Privkey (hex): ");
-			dumpbn(EC_KEY_get0_private_key(pkey));
-			pend = key_buf;
-			len = i2d_ECPrivateKey(pkey, &pend);
-			printf("Privkey (ASN1): ");
-			dumphex(key_buf, len);
-		}
-
+		p = snprintf(&json_buf[p], rem, "\"pattern\":\"%s\"", pattern);
+		assert(p > 0);
+		rem -= p;
+		if (rem < 0)
+			rem = 0;
+		p = sizeof(json_buf) - rem;
 	}
 
 	if (!vcp->vc_result_file || (vcp->vc_verbose > 0)) {
-		if (isscript)
-			printf("P2SHAddress: %s\n", addr2_buf);
-		printf("Address: %s\n"
-		       "%s: %s\n",
-		       addr_buf, keytype, privkey_buf);
+		if (isscript) {
+			p = snprintf(&json_buf[p], rem, ",\"p2shaddress\":\"%s\"", addr2_buf);
+			assert(p > 0);
+			rem -= p;
+			if (rem < 0)
+				rem = 0;
+		}
+
+		p = snprintf(&json_buf[p], rem, ",\"address\":\"%s\"", addr_buf);
+		assert(p > 0);
+		rem -= p;
+		if (rem < 0)
+			rem = 0;
+		p = sizeof(json_buf) - rem;
+
+		p = snprintf(&json_buf[p], rem, ",\"%s\":\"%s\"", keytype, privkey_buf);
+		assert(p > 0);
+		rem -= p;
+		if (rem < 0)
+			rem = 0;
+		p = sizeof(json_buf) - rem;
+	}
+
+	if (rem) {
+		json_buf[sizeof(json_buf)-rem] = '\0';
 	}
 
 	if (vcp->vc_result_file) {
@@ -588,18 +559,13 @@ vg_output_match_console(vg_context_t *vcp, EC_KEY *pkey, const char *pattern)
 				"ERROR: could not open result file: %s\n",
 				strerror(errno));
 		} else {
-			fprintf(fp,
-				"Pattern: %s\n"
-				, pattern);
-			if (isscript)
-				fprintf(fp, "P2SHAddress: %s\n", addr2_buf);
-			fprintf(fp,
-				"Address: %s\n"
-				"%s: %s\n",
-				addr_buf, keytype, privkey_buf);
+			fprintf(fp,"{%s}\n", json_buf);
 			fclose(fp);
 		}
 	}
+
+	printf("{%s}\n", json_buf);
+	
 	if (free_ppnt)
 		EC_POINT_free(ppnt);
 }
@@ -1259,11 +1225,9 @@ vg_prefix_context_next_difficulty(vg_prefix_context_t *vcpp,
 	dbuf = BN_bn2dec(bntmp2);
 	if (vcpp->base.vc_verbose > 0) {
 		if (vcpp->base.vc_npatterns > 1)
-			fprintf(stderr,
-				"Next match difficulty: %s (%ld prefixes)\n",
-				dbuf, vcpp->base.vc_npatterns);
+			printf("{\"difficulty\":%s,\"prefixes\":%ld}\n", dbuf, vcpp->base.vc_npatterns);
 		else
-			fprintf(stderr, "Difficulty: %s\n", dbuf);
+			printf("{\"difficulty\":%s,\"prefixes\":1}\n", dbuf);
 	}
 	vcpp->base.vc_chance = atof(dbuf);
 	OPENSSL_free(dbuf);
