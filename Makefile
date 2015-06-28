@@ -11,7 +11,7 @@ OPENCL_LIBS=-lOpenCL
 endif
 
 
-most: vanitygen keyconv
+most: vanitygen oclvanitygen
 
 all: $(PROGS)
 
