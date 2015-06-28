@@ -1,5 +1,6 @@
 *.oclbin
 *.o
+*.zip
 keyconv
 oclvanitygen
 oclvanityminer
